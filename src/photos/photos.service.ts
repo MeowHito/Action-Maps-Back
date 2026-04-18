@@ -56,6 +56,11 @@ export class PhotosService {
     }
     const ev = await this.events.getBySlug(slug);
 
+    const isHeic =
+      /\.hei[cf]$/i.test(nameLower) ||
+      mt === 'image/heic' ||
+      mt === 'image/heif';
+
     // Server-side normalise: decode (HEIC included), auto-rotate, resize, JPEG
     let outBuffer = file.buffer;
     let outName = file.originalname;
@@ -87,10 +92,19 @@ export class PhotosService {
       outWidth = processed.info.width;
       outHeight = processed.info.height;
     } catch (err) {
-      // Never block the upload on a processing error. Keep original bytes.
+      const msg = (err as Error).message;
       this.logger.warn(
-        `sharp processing failed for ${file.originalname} (${mt}): ${(err as Error).message}`,
+        `sharp processing failed for ${file.originalname} (${mt}): ${msg}`,
       );
+      // HEIC that sharp cannot decode is unusable (browsers can't render it).
+      // Fail loudly instead of saving bytes that would show as empty frames.
+      if (isHeic) {
+        throw new BadRequestException(
+          `Cannot decode HEIC file "${file.originalname}". ` +
+            `Ensure sharp is installed with libheif support on the server. Error: ${msg}`,
+        );
+      }
+      // Non-HEIC: keep original bytes (browser can still render JPEG/PNG/etc.).
     }
 
     const stored = await this.storage.save(
