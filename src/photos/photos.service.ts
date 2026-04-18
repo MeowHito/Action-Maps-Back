@@ -1,18 +1,25 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import sharp from 'sharp';
 import { PhotoDocument, PhotoEntity } from './schemas/photo.schema';
 import { CreatePhotoDto } from './dto/create-photo.dto';
 import { StorageService } from '../common/storage/storage.service';
 import { EventsService } from '../events/events.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 
+const MAX_DIM = 1600;
+const JPEG_QUALITY = 82;
+
 @Injectable()
 export class PhotosService {
+  private readonly logger = new Logger(PhotosService.name);
+
   constructor(
     @InjectModel(PhotoEntity.name)
     private readonly photoModel: Model<PhotoDocument>,
@@ -38,15 +45,58 @@ export class PhotosService {
     dto: CreatePhotoDto,
   ) {
     if (!file) throw new BadRequestException('photo file is required');
-    if (!(file.mimetype || '').startsWith('image/')) {
+    const mt = (file.mimetype || '').toLowerCase();
+    const nameLower = (file.originalname || '').toLowerCase();
+    const looksLikeImage =
+      mt.startsWith('image/') ||
+      mt === 'application/octet-stream' ||
+      /\.(jpe?g|png|webp|gif|hei[cf])$/i.test(nameLower);
+    if (!looksLikeImage) {
       throw new BadRequestException('only image files are allowed');
     }
     const ev = await this.events.getBySlug(slug);
 
+    // Server-side normalise: decode (HEIC included), auto-rotate, resize, JPEG
+    let outBuffer = file.buffer;
+    let outName = file.originalname;
+    let outMime = file.mimetype || 'image/jpeg';
+    let outWidth = dto.width ?? 0;
+    let outHeight = dto.height ?? 0;
+
+    try {
+      const pipeline = sharp(file.buffer, { failOn: 'none' }).rotate();
+      const meta = await pipeline.metadata();
+      const srcW = meta.width ?? 0;
+      const srcH = meta.height ?? 0;
+      const maxSide = Math.max(srcW, srcH);
+
+      const processed = await pipeline
+        .resize({
+          width: maxSide > MAX_DIM ? (srcW >= srcH ? MAX_DIM : undefined) : undefined,
+          height: maxSide > MAX_DIM ? (srcH > srcW ? MAX_DIM : undefined) : undefined,
+          fit: 'inside',
+          withoutEnlargement: true,
+        })
+        .jpeg({ quality: JPEG_QUALITY, mozjpeg: true })
+        .toBuffer({ resolveWithObject: true });
+
+      outBuffer = processed.data;
+      outMime = 'image/jpeg';
+      outName = file.originalname.replace(/\.(hei[cf]|png|webp|gif)$/i, '.jpg');
+      if (!outName.toLowerCase().endsWith('.jpg')) outName += '.jpg';
+      outWidth = processed.info.width;
+      outHeight = processed.info.height;
+    } catch (err) {
+      // Never block the upload on a processing error. Keep original bytes.
+      this.logger.warn(
+        `sharp processing failed for ${file.originalname} (${mt}): ${(err as Error).message}`,
+      );
+    }
+
     const stored = await this.storage.save(
-      file.buffer,
-      file.originalname,
-      file.mimetype || 'image/jpeg',
+      outBuffer,
+      outName,
+      outMime,
       `events/${ev._id.toString()}/photos`,
     );
 
@@ -54,8 +104,8 @@ export class PhotosService {
       eventId: ev._id,
       lat: dto.lat,
       lng: dto.lng,
-      width: dto.width ?? 0,
-      height: dto.height ?? 0,
+      width: outWidth,
+      height: outHeight,
       ...(dto.takenAt ? { takenAt: new Date(dto.takenAt) } : {}),
       ...(dto.uploader ? { uploader: dto.uploader } : {}),
       storageKey: stored.key,
