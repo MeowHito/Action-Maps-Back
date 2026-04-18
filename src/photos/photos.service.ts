@@ -7,6 +7,8 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import sharp from 'sharp';
+import exifr from 'exifr';
+import heicConvert from 'heic-convert';
 import { spawn } from 'child_process';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -66,6 +68,7 @@ export class PhotosService {
     dto: CreatePhotoDto,
   ) {
     if (!file) throw new BadRequestException('photo file is required');
+    const t0 = Date.now();
     const mt = (file.mimetype || '').toLowerCase();
     const nameLower = (file.originalname || '').toLowerCase();
     const looksLikeImage =
@@ -89,23 +92,104 @@ export class PhotosService {
     let outWidth = dto.width ?? 0;
     let outHeight = dto.height ?? 0;
 
-    // Sharp's bundled libheif cannot decode modern iPhone HEIC (HEVC with many
-    // auxiliary images). Offload HEIC decode to the system `heif-convert` /
-    // `heif-dec` CLI, which links to libheif 1.19+ (via /usr/local/lib/libheif.so.1).
+    // ---- Server-side EXIF GPS extraction ----
+    // Always try EXIF on the ORIGINAL buffer first. exifr can parse HEIC
+    // (ISOBMFF) metadata directly — this is the most reliable source of GPS,
+    // because later decode steps (heic-convert, sharp) may strip EXIF.
+    let lat = dto.lat;
+    let lng = dto.lng;
+    let takenAt = dto.takenAt ? dto.takenAt : undefined;
+    let gotExifGps = false;
+    try {
+      const exifT0 = Date.now();
+      const exif = await exifr.parse(file.buffer, {
+        gps: true,
+        pick: ['latitude', 'longitude', 'DateTimeOriginal', 'CreateDate'],
+      });
+      this.logger.debug(
+        `EXIF parse (original) ${file.originalname} took ${Date.now() - exifT0}ms`,
+      );
+      if (
+        exif &&
+        typeof exif.latitude === 'number' &&
+        typeof exif.longitude === 'number'
+      ) {
+        lat = exif.latitude;
+        lng = exif.longitude;
+        gotExifGps = true;
+        this.logger.log(
+          `GPS from EXIF for ${file.originalname}: ${lat}, ${lng}`,
+        );
+        const ts = (exif.DateTimeOriginal ?? exif.CreateDate) as
+          | Date
+          | undefined;
+        if (ts instanceof Date) {
+          takenAt = ts.toISOString();
+        }
+      }
+    } catch (exifErr) {
+      this.logger.warn(
+        `EXIF extraction (original) failed for ${file.originalname}: ${(exifErr as Error).message}`,
+      );
+    }
+
+    // ---- HEIC handling: always decode to JPEG first ----
+    // sharp().metadata() can read HEIC container headers but often CANNOT decode
+    // the actual pixels (no HEVC decoder on Windows / some Linux). Always decode
+    // HEIC to JPEG via CLI (heif-convert) or JS fallback (heic-convert) first.
     let sharpInput: Buffer = file.buffer;
+
     if (isHeic) {
       try {
+        const heicT0 = Date.now();
         sharpInput = await this.decodeHeicBufferToJpeg(file.buffer);
+        this.logger.debug(
+          `HEIC decode ${file.originalname} took ${Date.now() - heicT0}ms`,
+        );
+        // If we didn't get GPS from original buffer, try the decoded JPEG
+        if (!gotExifGps) {
+          try {
+            const exif = await exifr.parse(sharpInput, {
+              gps: true,
+              pick: [
+                'latitude',
+                'longitude',
+                'DateTimeOriginal',
+                'CreateDate',
+              ],
+            });
+            if (
+              exif &&
+              typeof exif.latitude === 'number' &&
+              typeof exif.longitude === 'number'
+            ) {
+              lat = exif.latitude;
+              lng = exif.longitude;
+              gotExifGps = true;
+              this.logger.log(
+                `GPS from EXIF (decoded) for ${file.originalname}: ${lat}, ${lng}`,
+              );
+              const ts = (exif.DateTimeOriginal ?? exif.CreateDate) as
+                | Date
+                | undefined;
+              if (ts instanceof Date) {
+                takenAt = ts.toISOString();
+              }
+            }
+          } catch {
+            // no GPS available
+          }
+        }
       } catch (err) {
         throw new BadRequestException(
           `Cannot decode HEIC file "${file.originalname}". ` +
-            `Make sure libheif 1.19+ and heif-convert are installed on the server. ` +
             `Error: ${(err as Error).message}`,
         );
       }
     }
 
     try {
+      const sharpT0 = Date.now();
       const pipeline = sharp(sharpInput, { failOn: 'none' }).rotate();
       const meta = await pipeline.metadata();
       const srcW = meta.width ?? 0;
@@ -128,6 +212,9 @@ export class PhotosService {
       if (!outName.toLowerCase().endsWith('.jpg')) outName += '.jpg';
       outWidth = processed.info.width;
       outHeight = processed.info.height;
+      this.logger.debug(
+        `sharp resize ${file.originalname} took ${Date.now() - sharpT0}ms`,
+      );
     } catch (err) {
       const msg = (err as Error).message;
       this.logger.warn(
@@ -153,16 +240,21 @@ export class PhotosService {
 
     const doc = await new this.photoModel({
       eventId: ev._id,
-      lat: dto.lat,
-      lng: dto.lng,
+      lat,
+      lng,
       width: outWidth,
       height: outHeight,
-      ...(dto.takenAt ? { takenAt: new Date(dto.takenAt) } : {}),
+      ...(takenAt ? { takenAt: new Date(takenAt) } : {}),
       ...(dto.uploader ? { uploader: dto.uploader } : {}),
       storageKey: stored.key,
       url: stored.url,
       size: stored.size,
     }).save();
+
+    this.logger.log(
+      `Photo ${file.originalname} processed in ${Date.now() - t0}ms ` +
+        `(lat=${lat}, lng=${lng}, size=${stored.size})`,
+    );
 
     const payload = doc.toObject();
     this.realtime.emitToEvent(slug, 'photo:created', payload);
@@ -170,31 +262,42 @@ export class PhotosService {
   }
 
   /**
-   * Decode a HEIC buffer to a JPEG buffer using the system heif-convert /
-   * heif-dec CLI. The CLI dynamically links to libheif.so.1 which, via
-   * ldconfig, resolves to /usr/local/lib/libheif.so.1 (built from 1.19+).
+   * Decode a HEIC buffer to a JPEG buffer.
+   * Strategy: try system CLI (heif-convert / heif-dec) first for speed,
+   * then fall back to the pure-JS heic-convert package (works on any OS).
    */
   private async decodeHeicBufferToJpeg(heic: Buffer): Promise<Buffer> {
+    // 1) Try native CLI decoder (fastest, requires libheif on the system)
     const decoder = await this.findHeicDecoder();
-    if (!decoder) {
-      throw new Error(
-        'No HEIC decoder found. Install libheif-examples or build libheif 1.19+ ' +
-          '(expected one of: ' +
-          HEIC_DECODERS.join(', ') +
-          '). You can also set HEIC_DECODER_PATH.',
+    if (decoder) {
+      const id = randomUUID();
+      const inPath = join(tmpdir(), `${id}.heic`);
+      const outPath = join(tmpdir(), `${id}.jpg`);
+      try {
+        await fs.writeFile(inPath, heic);
+        await this.runHeicDecoder(decoder, inPath, outPath);
+        return await fs.readFile(outPath);
+      } catch (cliErr) {
+        this.logger.warn(
+          `CLI HEIC decoder failed, falling back to JS decoder: ${(cliErr as Error).message}`,
+        );
+      } finally {
+        await fs.unlink(inPath).catch(() => undefined);
+        await fs.unlink(outPath).catch(() => undefined);
+      }
+    } else {
+      this.logger.debug(
+        'No CLI HEIC decoder found, using JS heic-convert fallback',
       );
     }
-    const id = randomUUID();
-    const inPath = join(tmpdir(), `${id}.heic`);
-    const outPath = join(tmpdir(), `${id}.jpg`);
-    try {
-      await fs.writeFile(inPath, heic);
-      await this.runHeicDecoder(decoder, inPath, outPath);
-      return await fs.readFile(outPath);
-    } finally {
-      await fs.unlink(inPath).catch(() => undefined);
-      await fs.unlink(outPath).catch(() => undefined);
-    }
+
+    // 2) Pure-JS fallback (works on Windows / any OS without libheif)
+    const output = await heicConvert({
+      buffer: heic,
+      format: 'JPEG',
+      quality: 0.9,
+    });
+    return Buffer.from(output);
   }
 
   private async findHeicDecoder(): Promise<string | null> {
