@@ -100,32 +100,36 @@ export class PhotosService {
     let lng = dto.lng;
     let takenAt = dto.takenAt ? dto.takenAt : undefined;
     let gotExifGps = false;
+    // exifr.gps() is the dedicated GPS extractor and always loads the raw
+    // GPSLatitude / GPSLongitude / *Ref tags. Using exifr.parse() with
+    // `pick: ['latitude', 'longitude']` silently returns undefined for HEIC
+    // because `pick` filters what exifr reads from the file, and the virtual
+    // `latitude`/`longitude` fields depend on raw tags that never get loaded.
     try {
       const exifT0 = Date.now();
-      const exif = await exifr.parse(file.buffer, {
-        gps: true,
-        pick: ['latitude', 'longitude', 'DateTimeOriginal', 'CreateDate'],
-      });
+      const gps = await exifr.gps(file.buffer);
       this.logger.debug(
-        `EXIF parse (original) ${file.originalname} took ${Date.now() - exifT0}ms`,
+        `EXIF gps (original) ${file.originalname} took ${Date.now() - exifT0}ms`,
       );
       if (
-        exif &&
-        typeof exif.latitude === 'number' &&
-        typeof exif.longitude === 'number'
+        gps &&
+        typeof gps.latitude === 'number' &&
+        typeof gps.longitude === 'number'
       ) {
-        lat = exif.latitude;
-        lng = exif.longitude;
+        lat = gps.latitude;
+        lng = gps.longitude;
         gotExifGps = true;
         this.logger.log(
           `GPS from EXIF for ${file.originalname}: ${lat}, ${lng}`,
         );
-        const ts = (exif.DateTimeOriginal ?? exif.CreateDate) as
-          | Date
-          | undefined;
-        if (ts instanceof Date) {
-          takenAt = ts.toISOString();
-        }
+      }
+      const meta = await exifr.parse(file.buffer, [
+        'DateTimeOriginal',
+        'CreateDate',
+      ]);
+      const ts = (meta?.DateTimeOriginal ?? meta?.CreateDate) as Date | undefined;
+      if (ts instanceof Date && !isNaN(ts.getTime())) {
+        takenAt = ts.toISOString();
       }
     } catch (exifErr) {
       this.logger.warn(
@@ -149,30 +153,28 @@ export class PhotosService {
         // If we didn't get GPS from original buffer, try the decoded JPEG
         if (!gotExifGps) {
           try {
-            const exif = await exifr.parse(sharpInput, {
-              gps: true,
-              pick: [
-                'latitude',
-                'longitude',
-                'DateTimeOriginal',
-                'CreateDate',
-              ],
-            });
+            const gps = await exifr.gps(sharpInput);
             if (
-              exif &&
-              typeof exif.latitude === 'number' &&
-              typeof exif.longitude === 'number'
+              gps &&
+              typeof gps.latitude === 'number' &&
+              typeof gps.longitude === 'number'
             ) {
-              lat = exif.latitude;
-              lng = exif.longitude;
+              lat = gps.latitude;
+              lng = gps.longitude;
               gotExifGps = true;
               this.logger.log(
                 `GPS from EXIF (decoded) for ${file.originalname}: ${lat}, ${lng}`,
               );
-              const ts = (exif.DateTimeOriginal ?? exif.CreateDate) as
+            }
+            if (!takenAt) {
+              const meta = await exifr.parse(sharpInput, [
+                'DateTimeOriginal',
+                'CreateDate',
+              ]);
+              const ts = (meta?.DateTimeOriginal ?? meta?.CreateDate) as
                 | Date
                 | undefined;
-              if (ts instanceof Date) {
+              if (ts instanceof Date && !isNaN(ts.getTime())) {
                 takenAt = ts.toISOString();
               }
             }
