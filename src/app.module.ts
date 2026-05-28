@@ -11,6 +11,7 @@ import { EventsModule } from './events/events.module';
 import { RoutesModule } from './routes/routes.module';
 import { PhotosModule } from './photos/photos.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { RealtimeModule } from './realtime/realtime.module';
     EventsModule,
     RoutesModule,
     PhotosModule,
+    AuthModule,
   ],
   controllers: [AppController],
   providers: [AppService],

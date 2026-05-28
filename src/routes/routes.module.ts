@@ -4,6 +4,7 @@ import { RouteEntity, RouteSchema } from './schemas/route.schema';
 import { RoutesService } from './routes.service';
 import { RoutesController } from './routes.controller';
 import { EventsModule } from '../events/events.module';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
@@ -11,6 +12,7 @@ import { EventsModule } from '../events/events.module';
       { name: RouteEntity.name, schema: RouteSchema },
     ]),
     EventsModule,
+    AuthModule,
   ],
   controllers: [RoutesController],
   providers: [RoutesService],

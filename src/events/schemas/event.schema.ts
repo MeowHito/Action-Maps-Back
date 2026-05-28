@@ -19,6 +19,15 @@ export class EventEntity {
 
   @Prop({ default: null })
   endsAt?: Date;
+
+  @Prop({ default: null, select: false })
+  adminCode?: string;
+
+  @Prop({ default: null, select: false })
+  uploadCode?: string;
+
+  @Prop({ default: null, select: false })
+  viewCode?: string;
 }
 
 export const EventSchema = SchemaFactory.createForClass(EventEntity);

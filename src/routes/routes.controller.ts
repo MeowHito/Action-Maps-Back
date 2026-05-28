@@ -6,12 +6,14 @@ import {
   Param,
   Post,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { RoutesService } from './routes.service';
 import { CreateRouteDto } from './dto/create-route.dto';
+import { EventAccess, EventAccessGuard } from '../auth/guards/event-access.guard';
 
 const MAX_GPX_MB = parseInt(process.env.MAX_GPX_SIZE_MB ?? '10', 10);
 
@@ -25,6 +27,8 @@ export class RoutesController {
   }
 
   @Post('events/:slug/routes')
+  @UseGuards(EventAccessGuard)
+  @EventAccess({ roles: ['admin'], matchSlug: true })
   @UseInterceptors(
     FileInterceptor('file', {
       storage: memoryStorage(),
@@ -40,6 +44,8 @@ export class RoutesController {
   }
 
   @Delete('routes/:id')
+  @UseGuards(EventAccessGuard)
+  @EventAccess({ roles: ['admin'], matchSlug: false })
   remove(@Param('id') id: string) {
     return this.routes.remove(id);
   }

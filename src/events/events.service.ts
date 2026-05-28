@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { createHash } from 'crypto';
 import { EventDocument, EventEntity } from './schemas/event.schema';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
@@ -16,6 +17,18 @@ export class EventsService {
     private readonly eventModel: Model<EventDocument>,
   ) {}
 
+  private hashCode(code: string): string {
+    return createHash('sha256').update(code).digest('hex');
+  }
+
+  private buildCodeFields(dto: { adminCode?: string; uploadCode?: string; viewCode?: string }) {
+    return {
+      ...(dto.adminCode !== undefined ? { adminCode: dto.adminCode ? this.hashCode(dto.adminCode) : null } : {}),
+      ...(dto.uploadCode !== undefined ? { uploadCode: dto.uploadCode ? this.hashCode(dto.uploadCode) : null } : {}),
+      ...(dto.viewCode !== undefined ? { viewCode: dto.viewCode ? this.hashCode(dto.viewCode) : null } : {}),
+    };
+  }
+
   async create(dto: CreateEventDto) {
     const exists = await this.eventModel.exists({ slug: dto.slug });
     if (exists) throw new ConflictException(`slug "${dto.slug}" already exists`);
@@ -25,6 +38,7 @@ export class EventsService {
       description: dto.description,
       ...(dto.startsAt ? { startsAt: new Date(dto.startsAt) } : {}),
       ...(dto.endsAt ? { endsAt: new Date(dto.endsAt) } : {}),
+      ...this.buildCodeFields(dto),
     });
     return doc.save();
   }
@@ -52,12 +66,14 @@ export class EventsService {
   }
 
   async update(slug: string, dto: UpdateEventDto) {
+    const { adminCode, uploadCode, viewCode, ...rest } = dto;
     const ev = await this.eventModel.findOneAndUpdate(
       { slug },
       {
-        ...dto,
-        ...(dto.startsAt ? { startsAt: new Date(dto.startsAt) } : {}),
-        ...(dto.endsAt ? { endsAt: new Date(dto.endsAt) } : {}),
+        ...rest,
+        ...(rest.startsAt ? { startsAt: new Date(rest.startsAt) } : {}),
+        ...(rest.endsAt ? { endsAt: new Date(rest.endsAt) } : {}),
+        ...this.buildCodeFields({ adminCode, uploadCode, viewCode }),
       },
       { new: true },
     );
@@ -69,6 +85,17 @@ export class EventsService {
     const ev = await this.eventModel.findOneAndDelete({ slug });
     if (!ev) throw new NotFoundException(`event "${slug}" not found`);
     return { ok: true, id: ev._id };
+  }
+
+  /** Fetch event including hashed code fields — for internal auth use only. */
+  async getBySlugWithCodes(slug: string) {
+    const ev = await this.eventModel
+      .findOne({ slug })
+      .select('+adminCode +uploadCode +viewCode')
+      .lean()
+      .exec();
+    if (!ev) throw new NotFoundException(`event "${slug}" not found`);
+    return ev;
   }
 
   /** Look up slug by _id (used when emitting realtime events after delete). */

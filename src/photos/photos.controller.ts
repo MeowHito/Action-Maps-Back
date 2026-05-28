@@ -7,12 +7,14 @@ import {
   Post,
   Query,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { PhotosService } from './photos.service';
 import { CreatePhotoDto } from './dto/create-photo.dto';
+import { EventAccess, EventAccessGuard } from '../auth/guards/event-access.guard';
 
 const MAX_PHOTO_MB = parseInt(process.env.MAX_PHOTO_SIZE_MB ?? '12', 10);
 
@@ -34,6 +36,8 @@ export class PhotosController {
   }
 
   @Post('events/:slug/photos')
+  @UseGuards(EventAccessGuard)
+  @EventAccess({ roles: ['admin', 'upload'], matchSlug: true })
   @UseInterceptors(
     FileInterceptor('file', {
       storage: memoryStorage(),
@@ -49,6 +53,8 @@ export class PhotosController {
   }
 
   @Delete('photos/:id')
+  @UseGuards(EventAccessGuard)
+  @EventAccess({ roles: ['admin'], matchSlug: false })
   remove(@Param('id') id: string) {
     return this.photos.remove(id);
   }
