@@ -28,10 +28,18 @@ export class AuthService {
     const event = await this.eventsService.getBySlugWithCodes(slug);
     const hashed = this.hashCode(code);
 
+    const hasAnyCodes = event.adminCode || event.uploadCode || event.viewCode;
+
     let role: EventRole | null = null;
-    if (event.adminCode && hashed === event.adminCode) role = 'admin';
-    else if (event.uploadCode && hashed === event.uploadCode) role = 'upload';
-    else if (event.viewCode && hashed === event.viewCode) role = 'view';
+    if (!hasAnyCodes) {
+      role = 'admin';
+    } else if (event.adminCode && hashed === event.adminCode) {
+      role = 'admin';
+    } else if (event.uploadCode && hashed === event.uploadCode) {
+      role = 'upload';
+    } else if (event.viewCode && hashed === event.viewCode) {
+      role = 'view';
+    }
 
     if (!role) throw new UnauthorizedException('Invalid access code');
 
