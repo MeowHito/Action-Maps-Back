@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument } from 'mongoose';
+import { HydratedDocument, Types } from 'mongoose';
 
 export type EventDocument = HydratedDocument<EventEntity>;
 
@@ -7,6 +7,11 @@ export type EventDocument = HydratedDocument<EventEntity>;
 export class EventEntity {
   @Prop({ required: true, unique: true, index: true, trim: true })
   slug: string;
+
+  /** User who created (owns) this event. Null for legacy events created before
+   *  ownership existed — those are manageable only by the super-admin. */
+  @Prop({ type: Types.ObjectId, ref: 'UserEntity', default: null, index: true })
+  ownerId?: Types.ObjectId | null;
 
   @Prop({ required: true, trim: true })
   name: string;

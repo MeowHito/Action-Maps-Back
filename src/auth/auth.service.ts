@@ -1,7 +1,7 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { createHash } from 'crypto';
 import { EventsService } from '../events/events.service';
+import { decryptCode, sha256 } from '../events/event-code.crypto';
 
 export type EventRole = 'admin' | 'upload' | 'view';
 
@@ -17,8 +17,13 @@ export class AuthService {
     private readonly jwtService: JwtService,
   ) {}
 
-  private hashCode(code: string): string {
-    return createHash('sha256').update(code).digest('hex');
+  /** Matches a submitted code against a stored value, supporting both the new
+   *  reversible-encrypted format and legacy SHA-256 hashes. */
+  private codeMatches(input: string, stored: string | null | undefined): boolean {
+    if (!stored) return false;
+    const decrypted = decryptCode(stored);
+    if (decrypted !== null) return decrypted === input;
+    return sha256(input) === stored; // legacy hashed code
   }
 
   async verifyEventCode(
@@ -26,18 +31,17 @@ export class AuthService {
     code: string,
   ): Promise<{ token: string; role: EventRole }> {
     const event = await this.eventsService.getBySlugWithCodes(slug);
-    const hashed = this.hashCode(code);
 
     const hasAnyCodes = event.adminCode || event.uploadCode || event.viewCode;
 
     let role: EventRole | null = null;
     if (!hasAnyCodes) {
       role = 'admin';
-    } else if (event.adminCode && hashed === event.adminCode) {
+    } else if (this.codeMatches(code, event.adminCode)) {
       role = 'admin';
-    } else if (event.uploadCode && hashed === event.uploadCode) {
+    } else if (this.codeMatches(code, event.uploadCode)) {
       role = 'upload';
-    } else if (event.viewCode && hashed === event.viewCode) {
+    } else if (this.codeMatches(code, event.viewCode)) {
       role = 'view';
     }
 

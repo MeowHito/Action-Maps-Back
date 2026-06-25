@@ -4,6 +4,7 @@ import { EventsModule } from '../events/events.module';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { EventAccessGuard } from './guards/event-access.guard';
+import { SiteAdminGuard } from './guards/site-admin.guard';
 
 @Module({
   imports: [
@@ -14,7 +15,7 @@ import { EventAccessGuard } from './guards/event-access.guard';
     EventsModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, EventAccessGuard],
-  exports: [AuthService, EventAccessGuard, JwtModule],
+  providers: [AuthService, EventAccessGuard, SiteAdminGuard],
+  exports: [AuthService, EventAccessGuard, SiteAdminGuard, JwtModule],
 })
 export class AuthModule {}

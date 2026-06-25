@@ -10,6 +10,7 @@ import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
 import { UserEntity, UserDocument } from './schemas/user.schema';
 import { MailService } from './mail.service';
+import { roleFor, SiteRole } from '../common/roles';
 
 @Injectable()
 export class UsersService {
@@ -32,13 +33,23 @@ export class UsersService {
     await this.userModel.create({ username, email, passwordHash });
   }
 
-  async validateLogin(username: string, password: string): Promise<string> {
+  async validateLogin(
+    username: string,
+    password: string,
+  ): Promise<{ token: string; username: string; email: string; role: SiteRole }> {
     const user = await this.userModel.findOne({ username });
     if (!user) throw new UnauthorizedException('Invalid username or password');
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) throw new UnauthorizedException('Invalid username or password');
-    const token = this.jwtService.sign({ username, type: 'site-admin' });
-    return token;
+    const role = roleFor(user.email);
+    const token = this.jwtService.sign({
+      sub: String(user._id),
+      username: user.username,
+      email: user.email,
+      type: 'site-admin',
+      role,
+    });
+    return { token, username: user.username, email: user.email, role };
   }
 
   async forgotPassword(email: string, appBaseUrl: string): Promise<void> {

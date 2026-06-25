@@ -17,8 +17,7 @@ export class UsersController {
 
   @Post('login')
   async login(@Body() dto: LoginDto) {
-    const token = await this.usersService.validateLogin(dto.username, dto.password);
-    return { username: dto.username, token };
+    return this.usersService.validateLogin(dto.username, dto.password);
   }
 
   @Post('forgot-password')
